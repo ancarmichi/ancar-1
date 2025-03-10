@@ -1,0 +1,785 @@
+package com.dukascopy.api.strategy.local;
+
+import com.dukascopy.api.*;
+import com.dukascopy.api.drawings.*;
+import com.dukascopy.api.events.MouseEvent;
+
+import java.awt.*;
+import java.util.*;
+import java.util.List;
+
+public class InterfazGraficaModule {
+
+    private final IChart chart;
+    private final IChartObjectFactory chartObjectFactory;
+    private final IIndicators indicators;
+    private final GeneracionSenalesModule generacionSenalesModule;
+    private final String eaId;
+
+    private final Map<String, InstanciaHerramienta> instanciasHerramienta = new HashMap<>();
+
+    private IButtonChartObject btnAjustar;
+    private IButtonChartObject btnActivar;
+    private IChartObject dragHandle; // Asa para mover los botones
+
+
+    public InterfazGraficaModule(IChart chart, GeneracionSenalesModule generacionSenalesModule, String eaId, IIndicators indicators) {
+        this.chart = chart;
+        this.chartObjectFactory = chart.getChartObjectFactory();
+        this.generacionSenalesModule = generacionSenalesModule;
+        this.eaId = eaId;
+        this.indicators = indicators;
+        crearBotonesAjuste();
+    }
+
+    private void crearBotonesAjuste() {
+        btnAjustar = chartObjectFactory.createButton("btnAjustar_" + eaId);
+        btnAjustar.setText("Ajustar");
+        btnAjustar.setX(10);
+        btnAjustar.setY(10);
+        btnAjustar.setHeight(20); // Ajustado para evitar el texto cortado
+        btnAjustar.setWidth(60);  // Ancho explícito.
+        btnAjustar.setColor(Color.WHITE);
+        btnAjustar.setBackgroundColor(Color.BLACK);
+        btnAjustar.setTooltip("Activa/desactiva el modo de ajuste de la herramienta");
+        btnAjustar.addListener(this::onBotonAjustarClicked);
+        chart.add(btnAjustar);
+
+        btnActivar = chartObjectFactory.createButton("btnActivar_" + eaId);
+        btnActivar.setText("Activar");
+        btnActivar.setX(80); // Ajustado para que esté junto al otro
+        btnActivar.setY(10);  // Misma Y que el otro botón.
+        btnActivar.setHeight(20);  // Ajustado para evitar el texto cortado.
+        btnActivar.setWidth(60);  // Ancho explícito.
+        btnActivar.setColor(Color.WHITE);
+        btnActivar.setBackgroundColor(Color.BLACK);
+        btnActivar.setTooltip("Activa la vigilancia de precios para la señal");
+        btnActivar.addListener(this::onBotonActivarClicked);
+
+        chart.add(btnActivar);
+
+        // Crear el asa para arrastrar
+        dragHandle = chartObjectFactory.createChartObject("dragHandle_" + eaId, IChartObject.Type.PRICE_MARKER);
+        dragHandle.setX(70); // Posición X en el medio de los dos botones
+        dragHandle.setY(20); // Posición Y un poco por debajo de los botones
+        dragHandle.setMarkerType(IPriceMarkerChartObject.MarkerType.CIRCLE); // Forma de círculo
+        dragHandle.setColor(Color.WHITE); // Color blanco
+        dragHandle.setHeight(10); // Tamaño del círculo
+        dragHandle.setWidth(10);
+        chart.add(dragHandle);
+
+        // Agregar listener para arrastrar el asa
+        dragHandle.addListener(mouseEvent -> {
+            if (mouseEvent.getType() == MouseEvent.Type.DRAGGED) {
+                // Obtener el desplazamiento del ratón
+                double deltaX = mouseEvent.getDeltaX();
+                double deltaY = mouseEvent.getDeltaY();
+
+                // Mover los dos botones y el asa
+                btnAjustar.setX(btnAjustar.getX() + deltaX);
+                btnAjustar.setY(btnAjustar.getY() + deltaY);
+
+                btnActivar.setX(btnActivar.getX() + deltaX);
+                btnActivar.setY(btnActivar.getY() + deltaY);
+
+                dragHandle.setX(dragHandle.getX() + deltaX);
+                dragHandle.setY(dragHandle.getY() + deltaY);
+            }
+        });
+
+    }
+
+
+
+    private void onBotonAjustarClicked(MouseEvent mouseEvent) {
+        if (mouseEvent.getType() == MouseEvent.Type.CLICKED) {
+            if (instanciasHerramienta.isEmpty() || !isAnyHerramientaVisible()) { //Si no existe o está oculta, se activa
+                String instanceId = UUID.randomUUID().toString();
+                InstanciaHerramienta herramienta = new InstanciaHerramienta(instanceId);
+                instanciasHerramienta.put(instanceId, herramienta);
+                herramienta.mostrar();
+            } else { //Si la herramienta esta activa, la desactiva
+                ocultarTodasLasHerramientas();
+                generacionSenalesModule.desactivarVigilancia(eaId);
+            }
+        }
+    }
+
+     private boolean isAnyHerramientaVisible() {
+        for (InstanciaHerramienta herramienta : instanciasHerramienta.values()) {
+            if (herramienta.isVisible()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void ocultarTodasLasHerramientas() {
+        instanciasHerramienta.values().forEach(InstanciaHerramienta::ocultar);
+        instanciasHerramienta.clear();
+    }
+
+
+    private void onBotonActivarClicked(MouseEvent mouseEvent) {
+        if (mouseEvent.getType() == MouseEvent.Type.CLICKED) {
+            instanciasHerramienta.values().stream()
+                .filter(InstanciaHerramienta::isVisible)
+                .findFirst() // Solo se activa la primera instancia visible (si hay varias)
+                .ifPresent(herramienta -> {
+                    generacionSenalesModule.activarVigilancia(
+                            herramienta.controlador.getNivelEntrada(),
+                            herramienta.controlador.getNivelSL(),
+                            herramienta.controlador.getNivelTP(),
+                            herramienta.controlador.esCompra(),
+                            eaId
+                    );
+                });
+        }
+    }
+
+
+
+    private class InstanciaHerramienta {
+        private final String instanceId;
+        private final VistaHerramienta vista;
+        private final ModeloHerramienta modelo;
+        private final ControladorHerramienta controlador;
+        private boolean visible = false;
+
+
+        public InstanciaHerramienta(String instanceId) {
+            this.instanceId = instanceId;
+            this.modelo = new ModeloHerramienta();
+            this.vista = new VistaHerramienta(instanceId);
+            this.controlador = new ControladorHerramienta(modelo, vista);
+        }
+
+        public void mostrar() {
+            vista.mostrar(chart.getBid());
+            visible = true;
+
+        }
+
+        public void ocultar() {
+            vista.ocultar();
+            visible = false;
+        }
+        public boolean isVisible(){
+            return visible;
+        }
+
+
+    }
+
+    private class ModeloHerramienta {
+        private double nivelEntrada;
+        private double nivelSL;
+        private double nivelTP;
+        private boolean esCompra = true;
+        private boolean ocultarEtiquetasAlSacarMouse = false;
+        private boolean ocultarEtiquetasAlEditar = false;
+
+
+        public double getNivelEntrada() {
+            return nivelEntrada;
+        }
+
+        public void setNivelEntrada(double nivelEntrada) {
+            this.nivelEntrada = nivelEntrada;
+        }
+
+        public double getNivelSL() {
+            return nivelSL;
+        }
+
+        public void setNivelSL(double nivelSL) {
+            this.nivelSL = nivelSL;
+        }
+
+        public double getNivelTP() {
+            return nivelTP;
+        }
+
+        public void setNivelTP(double nivelTP) {
+            this.nivelTP = nivelTP;
+        }
+
+        public boolean isEsCompra() {
+            return esCompra;
+        }
+
+        public void setEsCompra(boolean esCompra) {
+            this.esCompra = esCompra;
+        }
+
+        public boolean isOcultarEtiquetasAlSacarMouse() {
+            return ocultarEtiquetasAlSacarMouse;
+        }
+
+        public void setOcultarEtiquetasAlSacarMouse(boolean ocultarEtiquetasAlSacarMouse) {
+            this.ocultarEtiquetasAlSacarMouse = ocultarEtiquetasAlSacarMouse;
+        }
+
+        public boolean isOcultarEtiquetasAlEditar() {
+            return ocultarEtiquetasAlEditar;
+        }
+
+        public void setOcultarEtiquetasAlEditar(boolean ocultarEtiquetasAlEditar) {
+            this.ocultarEtiquetasAlEditar = ocultarEtiquetasAlEditar;
+        }
+    }
+
+
+
+    private class VistaHerramienta {
+        private final String instanceId;
+        private IRectangularChartObject rectangulo;
+        private ILineChartObject lineaEntrada;
+        private ILineChartObject lineaSL;
+        private ILineChartObject lineaTP;
+        private ITextChartObject labelEntrada;
+        private ITextChartObject labelSL;
+        private ITextChartObject labelTP;
+        private IPanelChartObject menu; // El menu
+        private IButtonChartObject btnConfig;
+        private IButtonChartObject btnCambiarLado;
+        private IPanelChartObject ventanaConfig;
+
+
+
+        public VistaHerramienta(String instanceId) {
+            this.instanceId = instanceId;
+        }
+
+        public void mostrar(double precioInicial) {
+            double pipValue = indicators.getPipPrice(chart.getInstrument());
+            double slInicial = precioInicial - 10 * pipValue;
+            double tpInicial = precioInicial + 20 * pipValue;
+
+
+            rectangulo = chartObjectFactory.createRectangle("rect_" + instanceId, precioInicial, 0, tpInicial, 0); //Usamos 0 como tiempo inicial
+            rectangulo.setColor(Color.WHITE);
+            rectangulo.setFilled(false);
+
+            lineaEntrada = chartObjectFactory.createPriceMarker("entrada_" + instanceId, precioInicial);
+            lineaEntrada.setColor(Color.WHITE);
+            lineaEntrada.setLineStyle(LineStyle.SOLID);
+
+            lineaSL = chartObjectFactory.createPriceMarker("sl_" + instanceId, slInicial);
+            lineaSL.setColor(Color.WHITE);
+            lineaSL.setLineStyle(LineStyle.SOLID);
+
+            lineaTP = chartObjectFactory.createPriceMarker("tp_" + instanceId, tpInicial);
+            lineaTP.setColor(Color.WHITE);
+            lineaTP.setLineStyle(LineStyle.SOLID);
+
+            labelEntrada = chartObjectFactory.createText("labelEntrada_" + instanceId, precioInicial, 0);
+            labelEntrada.setText("2.00");
+            labelEntrada.setColor(Color.WHITE);
+            labelEntrada.setBackgroundColor(Color.GREEN); // Inicialmente compra
+            labelEntrada.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 10));
+
+
+            labelSL = chartObjectFactory.createText("labelSL_" + instanceId, slInicial, 0);
+            labelSL.setText("SL 10.0");
+            labelSL.setColor(Color.WHITE);
+            labelSL.setBackgroundColor(new Color(192, 192, 192, 77)); // Gris con alfa
+            labelSL.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 10));
+
+            labelTP = chartObjectFactory.createText("labelTP_" + instanceId, tpInicial, 0);
+            labelTP.setText("TP 20.0");
+            labelTP.setColor(Color.WHITE);
+            labelTP.setBackgroundColor(new Color(192, 192, 192, 77));  // Gris con alfa
+            labelTP.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 10));
+
+            chart.add(rectangulo);
+            chart.add(lineaEntrada);
+            chart.add(lineaSL);
+            chart.add(lineaTP);
+            chart.add(labelEntrada);
+            chart.add(labelSL);
+            chart.add(labelTP);
+
+             // Añadir listeners para el drag and drop
+            lineaEntrada.addListener(this::onEntradaDragged);
+            lineaSL.addListener(this::onSLDragged);
+            lineaTP.addListener(this::onTPDragged);
+            // Listener para el menú en la línea de entrada
+            lineaEntrada.addListener(this::onEntradaDoubleClick);
+
+            // Listener para arrastrar toda la herramienta desde los bordes del rectangulo
+            rectangulo.addListener(this::onRectanguloDragged);
+            rectangulo.addListener(this::onMouseOverRectangulo);
+            rectangulo.addListener(this::onMouseOutRectangulo);
+
+
+            actualizarRectangulo();
+            actualizarPosicionesEtiquetas();
+
+        }
+
+        private void onMouseOverRectangulo(MouseEvent mouseEvent) {
+           if (mouseEvent.getType() == MouseEvent.Type.MOUSE_ENTERED && instanciasHerramienta.get(instanceId).modelo.ocultarEtiquetasAlSacarMouse) {
+                labelEntrada.setVisible(true);
+                labelSL.setVisible(true);
+                labelTP.setVisible(true);
+            }
+        }
+
+        private void onMouseOutRectangulo(MouseEvent mouseEvent) {
+             if (mouseEvent.getType() == MouseEvent.Type.MOUSE_EXITED && instanciasHerramienta.get(instanceId).modelo.ocultarEtiquetasAlSacarMouse) {
+                labelEntrada.setVisible(false);
+                labelSL.setVisible(false);
+                labelTP.setVisible(false);
+            }
+        }
+
+
+        private void onRectanguloDragged(MouseEvent mouseEvent) {
+             if (mouseEvent.getType() == MouseEvent.Type.DRAGGED) {
+
+                 if (mouseEvent.getSource() instanceof IRectangularChartObject) { //Solo se permite el arrastre desde el borde.
+
+                     double deltaY = mouseEvent.getDeltaPrice();
+
+                     // Obtener los niveles actuales.
+                     double nuevoNivelEntrada = lineaEntrada.getPrice() + deltaY;
+                     double nuevoNivelSL = lineaSL.getPrice() + deltaY;
+                     double nuevoNivelTP = lineaTP.getPrice() + deltaY;
+
+                     // Establecer los nuevos niveles en las líneas
+                     lineaEntrada.setPrice(nuevoNivelEntrada);
+                     lineaSL.setPrice(nuevoNivelSL);
+                     lineaTP.setPrice(nuevoNivelTP);
+
+                     // Actualizar el rectángulo y etiquetas, y notificar al controlador.
+                     actualizarRectangulo();
+                     actualizarPosicionesEtiquetas();
+                     instanciasHerramienta.get(instanceId).controlador.actualizarNiveles(); //Notificar al controlador.
+                 }
+             }
+         }
+
+
+        private void onEntradaDoubleClick(MouseEvent mouseEvent) {
+             if (mouseEvent.getType() == MouseEvent.Type.MOUSE_DOUBLE_CLICKED && mouseEvent.getSource() == lineaEntrada ) {
+                mostrarMenu(mouseEvent.getX(), mouseEvent.getY());
+            }
+        }
+
+        private void mostrarMenu(double x, double y) {
+            if (menu != null) {
+                chart.remove(menu); // Eliminar menú existente
+            }
+
+            menu = chartObjectFactory.createChartPanel("menu_" + instanceId);
+            menu.setX(x);
+
+            // Asegurarse de que el menú no se salga del borde superior del gráfico
+            double chartHeight = chart.getHeight(); // Obtener la altura actual del gráfico
+            y = Math.min(y, chartHeight - 50); // Ajustar 'y' para que esté dentro del límite, asumiendo una altura máxima del menú
+
+            menu.setY(y); // Establecer la posición Y ajustada
+            menu.setWidth(40);
+            menu.setHeight(50); // Altura para 2 botones
+            menu.setBackgroundColor(Color.BLACK);
+            menu.setBorderColor(Color.BLACK);
+
+
+            btnConfig = chartObjectFactory.createButton("btnConfig_" + instanceId);
+            btnConfig.setText("⚙");
+            btnConfig.setX(0);
+            btnConfig.setY(0);
+            btnConfig.setWidth(40);
+            btnConfig.setHeight(25);
+            btnConfig.setColor(Color.WHITE);
+            btnConfig.setBackgroundColor(Color.BLACK);
+            btnConfig.addListener(this::onBotonConfigClicked);
+            menu.add(btnConfig);
+
+            btnCambiarLado = chartObjectFactory.createButton("btnCambiarLado_" + instanceId);
+            btnCambiarLado.setText("↔"); // Flechas bidireccionales
+            btnCambiarLado.setX(0);
+            btnCambiarLado.setY(25); // Debajo del botón de configuración
+            btnCambiarLado.setWidth(40);
+            btnCambiarLado.setHeight(25);
+            btnCambiarLado.setColor(Color.WHITE);
+            btnCambiarLado.setBackgroundColor(Color.BLACK);
+            btnCambiarLado.addListener(this::onBotonCambiarLadoClicked);
+            menu.add(btnCambiarLado);
+
+           chart.add(menu);
+
+            // Listener para arrastrar el menú
+            menu.addListener(mouseEvent -> {
+                if (mouseEvent.getType() == MouseEvent.Type.DRAGGED) {
+                    menu.setX(menu.getX() + mouseEvent.getDeltaX());
+                    menu.setY(menu.getY() + mouseEvent.getDeltaY());
+                }
+            });
+        }
+
+         private void onBotonConfigClicked(MouseEvent mouseEvent) {
+            if (mouseEvent.getType() == MouseEvent.Type.CLICKED) {
+                mostrarVentanaConfig();
+            }
+        }
+
+         private void mostrarVentanaConfig() {
+             if (ventanaConfig != null) {
+                chart.remove(ventanaConfig); // Elimina ventana existente si la hay
+            }
+
+            ventanaConfig = chartObjectFactory.createChartPanel("ventanaConfig_" + instanceId);
+            ventanaConfig.setX(menu.getX() + menu.getWidth() + 5); // Al lado del menú
+            ventanaConfig.setY(menu.getY());
+            ventanaConfig.setWidth(180); // Ajustar
+            ventanaConfig.setHeight(150); // Ajustar
+            ventanaConfig.setBackgroundColor(Color.BLACK);
+            ventanaConfig.setBorderColor(Color.GRAY);
+
+            // Crear y añadir los elementos de la ventana
+            addVentanaConfigElements();
+
+            chart.add(ventanaConfig);
+
+            // Listener para arrastrar la ventana
+            ventanaConfig.addListener(mouseEvent -> {
+                if (mouseEvent.getType() == MouseEvent.Type.DRAGGED) {
+                    ventanaConfig.setX(ventanaConfig.getX() + mouseEvent.getDeltaX());
+                    ventanaConfig.setY(ventanaConfig.getY() + mouseEvent.getDeltaY());
+                }
+            });
+         }
+
+         private void addVentanaConfigElements(){
+             //Parámetros fijos
+             ITextChartObject labelSLFijo = chartObjectFactory.createText("labelSLFijo_" + instanceId, 0, 0);
+             labelSLFijo.setText("Stop Loss");
+             labelSLFijo.setColor(Color.WHITE);
+             labelSLFijo.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 10));
+             ventanaConfig.add(labelSLFijo,5, 5, 0, 0); // Ajustar posicion
+
+             ITextChartObject rectSL = chartObjectFactory.createText("rectSL_" + instanceId, 0, 0);
+             rectSL.setText(String.format("%.5f", lineaSL.getPrice()));
+             rectSL.setColor(Color.WHITE);
+             rectSL.setBackgroundColor(Color.GRAY);
+             rectSL.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 10));
+             ventanaConfig.add(rectSL, 100, 5, 0, 0);
+
+             ITextChartObject labelEntradaFijo = chartObjectFactory.createText("labelEntradaFijo_" + instanceId, 0, 0);
+             labelEntradaFijo.setText("Entrada");
+             labelEntradaFijo.setColor(Color.WHITE);
+             labelEntradaFijo.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 10));
+             ventanaConfig.add(labelEntradaFijo, 5, 30, 0, 0); // Ajustar posicion
+
+             ITextChartObject rectEntrada = chartObjectFactory.createText("rectEntrada_" + instanceId, 0, 0);
+             rectEntrada.setText(String.format("%.5f", lineaEntrada.getPrice()));
+             rectEntrada.setColor(Color.WHITE);
+             rectEntrada.setBackgroundColor(Color.GRAY);
+             rectEntrada.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 10));
+             ventanaConfig.add(rectEntrada, 100, 30, 0, 0); // Ajustar posicion
+
+             ITextChartObject labelTPFijo = chartObjectFactory.createText("labelTPFijo_" + instanceId, 0, 0);
+             labelTPFijo.setText("Take Profit");
+             labelTPFijo.setColor(Color.WHITE);
+             labelTPFijo.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 10));
+             ventanaConfig.add(labelTPFijo,5, 55, 0, 0); // Ajustar posicion
+
+             ITextChartObject rectTP = chartObjectFactory.createText("rectTP_" + instanceId, 0, 0);
+             rectTP.setText(String.format("%.5f", lineaTP.getPrice())); // Formatear a 5 decimales
+             rectTP.setColor(Color.WHITE);
+             rectTP.setBackgroundColor(Color.GRAY);
+             rectTP.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 10));
+             ventanaConfig.add(rectTP, 100, 55, 0, 0); // Ajustar posicion
+
+             //Opciones
+             IButtonChartObject checkOcultarEtiquetasMouse = chartObjectFactory.createButton("checkOcultar_" + instanceId);
+             checkOcultarEtiquetasMouse.setText("Ocultar etiquetas al sacar el mouse");
+             checkOcultarEtiquetasMouse.setHeight(20);
+             checkOcultarEtiquetasMouse.setWidth(170);
+             checkOcultarEtiquetasMouse.setColor(Color.WHITE);
+             checkOcultarEtiquetasMouse.setBackgroundColor(Color.BLACK);
+             checkOcultarEtiquetasMouse.setFont(new Font(Font.SANS_SERIF,Font.PLAIN, 10));
+             checkOcultarEtiquetasMouse.setSelected(instanciasHerramienta.get(instanceId).modelo.isOcultarEtiquetasAlSacarMouse()); //Estado inicial
+             checkOcultarEtiquetasMouse.addListener(mouseEvent -> {
+                if(mouseEvent.getType() == MouseEvent.Type.CLICKED){
+                    instanciasHerramienta.get(instanceId).modelo.setOcultarEtiquetasAlSacarMouse(checkOcultarEtiquetasMouse.isSelected());
+                }
+             });
+             ventanaConfig.add(checkOcultarEtiquetasMouse, 5, 80, 0, 0);
+
+             IButtonChartObject checkOcultarEtiquetasEditar = chartObjectFactory.createButton("checkEditar_" + instanceId);
+             checkOcultarEtiquetasEditar.setText("Ocultar etiquetas al editar");
+             checkOcultarEtiquetasEditar.setHeight(20);
+             checkOcultarEtiquetasEditar.setWidth(170);
+             checkOcultarEtiquetasEditar.setColor(Color.WHITE);
+             checkOcultarEtiquetasEditar.setBackgroundColor(Color.BLACK);
+             checkOcultarEtiquetasEditar.setFont(new Font(Font.SANS_SERIF,Font.PLAIN, 10));
+             checkOcultarEtiquetasEditar.setSelected(instanciasHerramienta.get(instanceId).modelo.isOcultarEtiquetasAlEditar());
+             checkOcultarEtiquetasEditar.addListener(mouseEvent -> {
+                 if(mouseEvent.getType() == MouseEvent.Type.CLICKED){
+                     instanciasHerramienta.get(instanceId).modelo.setOcultarEtiquetasAlEditar(checkOcultarEtiquetasEditar.isSelected());
+                 }
+             });
+             ventanaConfig.add(checkOcultarEtiquetasEditar, 5, 110, 0, 0);
+         }
+
+
+        private void onBotonCambiarLadoClicked(MouseEvent mouseEvent) {
+            if (mouseEvent.getType() == MouseEvent.Type.CLICKED) {
+                instanciasHerramienta.get(instanceId).controlador.cambiarLado();
+            }
+        }
+
+
+        private void onEntradaDragged(MouseEvent mouseEvent) {
+            if (mouseEvent.getType() == MouseEvent.Type.DRAGGED) {
+                // Obtener nuevo nivel y actualizar, con validación
+                double nuevoNivel = lineaEntrada.getPrice() + mouseEvent.getDeltaPrice();
+                 if (instanciasHerramienta.get(instanceId).modelo.esCompra) {
+                    if(nuevoNivel <= lineaSL.getPrice() || nuevoNivel >= lineaTP.getPrice()){
+                        return; //No se permite el movimiento
+                    }
+                } else {
+                     if(nuevoNivel >= lineaSL.getPrice() || nuevoNivel <= lineaTP.getPrice()){
+                         return;
+                     }
+                }
+                lineaEntrada.setPrice(nuevoNivel);
+                actualizarRectangulo();
+                actualizarPosicionesEtiquetas();
+                instanciasHerramienta.get(instanceId).controlador.actualizarNiveles();
+
+                 if(instanciasHerramienta.get(instanceId).modelo.ocultarEtiquetasAlEditar){
+                        labelEntrada.setVisible(false);
+                        labelSL.setVisible(false);
+                        labelTP.setVisible(false);
+                    }
+
+            }
+            if(mouseEvent.getType() == MouseEvent.Type.RELEASED){
+                labelEntrada.setVisible(true);
+                labelSL.setVisible(true);
+                labelTP.setVisible(true);
+            }
+        }
+
+        private void onSLDragged(MouseEvent mouseEvent) {
+            if (mouseEvent.getType() == MouseEvent.Type.DRAGGED) {
+                double nuevoNivel = lineaSL.getPrice() + mouseEvent.getDeltaPrice();
+                //Validaciones
+                if (instanciasHerramienta.get(instanceId).modelo.esCompra) {
+                    if (nuevoNivel >= lineaEntrada.getPrice()) {
+                        return; // No se mueve
+                    }
+                } else {
+                    if (nuevoNivel <= lineaEntrada.getPrice()) {
+                        return;
+                    }
+                }
+                lineaSL.setPrice(nuevoNivel);
+                actualizarRectangulo();
+                actualizarPosicionesEtiquetas();
+                instanciasHerramienta.get(instanceId).controlador.actualizarNiveles();
+
+                if(instanciasHerramienta.get(instanceId).modelo.ocultarEtiquetasAlEditar){
+                    labelEntrada.setVisible(false);
+                    labelSL.setVisible(false);
+                    labelTP.setVisible(false);
+                }
+            }
+             if(mouseEvent.getType() == MouseEvent.Type.RELEASED){
+                labelEntrada.setVisible(true);
+                labelSL.setVisible(true);
+                labelTP.setVisible(true);
+            }
+        }
+
+        private void onTPDragged(MouseEvent mouseEvent) {
+            if (mouseEvent.getType() == MouseEvent.Type.DRAGGED) {
+                 double nuevoNivel = lineaTP.getPrice() + mouseEvent.getDeltaPrice();
+                if (instanciasHerramienta.get(instanceId).modelo.esCompra) {
+                    if (nuevoNivel <= lineaEntrada.getPrice()) {
+                       return;
+                    }
+                } else {
+                    if (nuevoNivel >= lineaEntrada.getPrice()) {
+                        return;
+                    }
+                }
+
+                lineaTP.setPrice(nuevoNivel);
+                actualizarRectangulo();
+                actualizarPosicionesEtiquetas();
+                instanciasHerramienta.get(instanceId).controlador.actualizarNiveles();
+
+                if(instanciasHerramienta.get(instanceId).modelo.ocultarEtiquetasAlEditar){
+                    labelEntrada.setVisible(false);
+                    labelSL.setVisible(false);
+                    labelTP.setVisible(false);
+                }
+            }
+             if(mouseEvent.getType() == MouseEvent.Type.RELEASED){
+                labelEntrada.setVisible(true);
+                labelSL.setVisible(true);
+                labelTP.setVisible(true);
+            }
+        }
+
+
+        public void actualizarRectangulo() {
+            double precioEntrada = lineaEntrada.getPrice();
+            double precioSL = lineaSL.getPrice();
+            double precioTP = lineaTP.getPrice();
+
+            rectangulo.setPrice(precioEntrada, 0);
+            rectangulo.setPrice2(precioSL, 0);
+            rectangulo.setPrice(precioEntrada, 1);
+            rectangulo.setPrice2(precioTP, 1);
+
+            // Zona de SL (roja)
+            if (precioSL < precioEntrada) {
+                rectangulo.setFillColor(new Color(255, 0, 0, 77), 0); // Rojo con alfa
+            } else {
+                rectangulo.setFillColor(new Color(255, 0, 0, 77), 1);
+            }
+
+            // Zona de TP (verde)
+            if (precioTP > precioEntrada) {
+                rectangulo.setFillColor(new Color(0, 255, 0, 77), 1); // Verde con alfa
+            } else {
+                rectangulo.setFillColor(new Color(0, 255, 0, 77), 0);
+            }
+            try {
+                 if(ventanaConfig != null){
+                    ((ITextChartObject) ventanaConfig.get(1)).setText(String.format("%.5f", lineaSL.getPrice()));
+                    ((ITextChartObject) ventanaConfig.get(3)).setText(String.format("%.5f", lineaEntrada.getPrice()));
+                    ((ITextChartObject) ventanaConfig.get(5)).setText(String.format("%.5f", lineaTP.getPrice()));
+                }
+            } catch (Exception e){
+                e.printStackTrace();
+            }
+
+        }
+
+        private void actualizarPosicionesEtiquetas() {
+            double precioEntrada = lineaEntrada.getPrice();
+            double precioSL = lineaSL.getPrice();
+            double precioTP = lineaTP.getPrice();
+            double pipValue = indicators.getPipPrice(chart.getInstrument());
+
+             // Calcular la diferencia en pips
+            double slPips = Math.abs(precioEntrada - precioSL) / pipValue;
+            double tpPips = Math.abs(precioTP - precioEntrada) / pipValue;
+            double ratio = tpPips / slPips;
+
+
+            labelEntrada.setText(String.format("%.2f", ratio));
+            //Posicion de la etiqueta entrada
+            labelEntrada.setPrice(precioEntrada, 0);
+            labelEntrada.setX(lineaEntrada.getX() - labelEntrada.getWidth() - 5);
+
+            //Posicion de la etiqueta SL
+            labelSL.setText(String.format("SL %.1f", slPips));
+            labelSL.setPrice(precioSL, 0); // Alinear con la línea de SL
+            labelSL.setX(lineaSL.getX() - labelSL.getWidth() - 5);
+
+            //Posicion de la etiqueta TP
+            labelTP.setText(String.format("TP %.1f", tpPips));
+            labelTP.setPrice(precioTP, 0); // Alinear con la línea de TP
+            labelTP.setX(lineaTP.getX() - labelTP.getWidth() - 5); // A la izquierda
+
+        }
+
+         public void actualizarLado(boolean esCompra) {
+            if (esCompra) {
+                labelEntrada.setBackgroundColor(Color.GREEN);
+            } else {
+                labelEntrada.setBackgroundColor(Color.RED);
+            }
+            actualizarRectangulo(); // Para recalcular las zonas de color
+        }
+
+        public void ocultar() {
+
+            chart.remove(rectangulo);
+            chart.remove(lineaEntrada);
+            chart.remove(lineaSL);
+            chart.remove(lineaTP);
+            chart.remove(labelEntrada);
+            chart.remove(labelSL);
+            chart.remove(labelTP);
+            if (menu != null) {
+                chart.remove(menu);
+            }
+            if(ventanaConfig != null){
+                chart.remove(ventanaConfig);
+            }
+        }
+    }
+    private class ControladorHerramienta {
+        private final ModeloHerramienta modelo;
+        private final VistaHerramienta vista;
+
+        public ControladorHerramienta(ModeloHerramienta modelo, VistaHerramienta vista) {
+            this.modelo = modelo;
+            this.vista = vista;
+        }
+
+        public void actualizarNiveles() {
+            modelo.setNivelEntrada(vista.lineaEntrada.getPrice());
+            modelo.setNivelSL(vista.lineaSL.getPrice());
+            modelo.setNivelTP(vista.lineaTP.getPrice());
+
+            // Llamar al método del módulo de señales para actualizar los niveles
+            generacionSenalesModule.actualizarNiveles(
+                modelo.getNivelEntrada(),
+                modelo.getNivelSL(),
+                modelo.getNivelTP(),
+                modelo.isEsCompra(),
+                eaId
+            );
+
+        }
+
+        public double getNivelEntrada() {
+            return modelo.getNivelEntrada();
+        }
+
+        public double getNivelSL() {
+            return modelo.getNivelSL();
+        }
+
+        public double getNivelTP() {
+            return modelo.getNivelTP();
+        }
+        public boolean esCompra(){
+            return modelo.isEsCompra();
+        }
+
+        public void cambiarLado() {
+            // Intercambiar SL y TP
+            double tempSL = modelo.getNivelSL();
+            double tempTP = modelo.getNivelTP();
+            double nuevoSL = vista.lineaEntrada.getPrice() - (tempTP - vista.lineaEntrada.getPrice());
+            double nuevoTP = vista.lineaEntrada.getPrice() - (tempSL - vista.lineaEntrada.getPrice());
+
+            // Establecer los nuevos niveles. No es necesario hacer las comprobaciones aquí porque los
+            // valores ya son correctos.
+            vista.lineaSL.setPrice(nuevoSL);
+            vista.lineaTP.setPrice(nuevoTP);
+
+            // Invertir la dirección de la operación
+            modelo.setEsCompra(!modelo.isEsCompra());
+            vista.actualizarLado(modelo.isEsCompra());
+
+            //Actualizar el rectangulo, etiquetas y el modulo de señales
+            vista.actualizarRectangulo();
+            vista.actualizarPosicionesEtiquetas();
+            actualizarNiveles(); // Importante actualizar los niveles en el modelo.
+        }
+
+    }
+}
+     
